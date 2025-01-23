@@ -1,0 +1,333 @@
+---
+title: "R Notebook"
+output: html_notebook
+fig_width: 6
+fig_height: 6
+---
+
+# 0. prepare
+## Lord the packages, the data, etc.
+```{r}
+suppressPackageStartupMessages({
+library("reshape2")
+library("plyr")
+library("dplyr")
+library("ggpubr")
+library("data.table")
+library("MASS")
+library("R.utils")
+library("nlme")
+library("forestplot")
+})
+
+mut.rate.cutoff = 0.05
+tmb.cutoff = 10
+#
+oDir = normalizePath("./OUT_Fig4", mustWork=F)
+dir.create(oDir, F,T)
+
+## read colSet
+colSet = readRDS(sprintf("%s/../../data/metaInfo/panC.colSet.list.rds",oDir))
+
+## read freqInfo
+freqInfo = as.data.frame(matrix(NA, nrow=0, ncol=4))
+colnames(freqInfo) = c("patient", "cancerType","cluster","Percent")
+files = c("panC.freq.CD8.ht.tb.rds",
+          "panC.freq.CD4.ht.tb.rds",
+          "panC.freq.Th.ht.tb.rds")
+# panC.freq.all.freq.CD4.ht.tb.rds: exclude Treg-enriched samples
+# panC.freq.all.freq.Th.ht.tb.rds: include all samples but only calculate freqencies of Th clusters.
+for (file in files){
+  stype = ifelse(file=="panC.freq.CD8.ht.tb.rds", "CD8", "CD4")
+  .freqInfo = readRDS(sprintf("%s/../../data/metaInfo/%s",oDir,file))
+  .freqInfo = .freqInfo[ stype==stype,]
+  .freqInfo = .freqInfo[loc=="T",]
+  .freqInfo = .freqInfo[grep("(thisStudy|CRC.LeiZhang2018|NSCLC.XinyiGuo2018|HCC.ChunhongZheng2017|STAD.BoxiKang2020)", donor.var) ,]
+  ##
+  .freqInfo$patient = as.character( gsub("^[^\\.]+\\.[^\\.]+\\.(.*)", "\\1", .freqInfo$donor.var) )
+  .freqInfo$cluster = as.character( .freqInfo$group.var )
+  .freqInfo$cancerType = as.character( gsub("^([^\\.]+).*", "\\1", .freqInfo$donor.var) )
+  .freqInfo$Percent = .freqInfo$freq * 100
+  if (file=="panC.freq.CD4.ht.tb.rds"){
+    .freqInfo = .freqInfo[ grep("Treg", .freqInfo$cluster), ]
+  }
+  .freqInfo = .freqInfo[,c("patient", "cancerType","cluster","Percent")]
+  ##
+  freqInfo = rbind(freqInfo, .freqInfo)
+}
+
+## read TMB
+tmb = read.table(sprintf("%s/../../data/metaInfo/panC.TMB.txt", oDir), header=F, check.names=F, stringsAsFactors=F)
+colnames(tmb) = c("patient","cancerType","TMB")
+#
+tmb$TMB_group = ifelse(tmb$TMB>tmb.cutoff, "high", "low")
+tmb$TMB_group = factor(tmb$TMB_group, levels=c("low","high"))
+```
+
+# 1. TMB analysis:
+## subset, calculate and then merge tables
+```{r, fig.width=8, fig.height=5}
+overlap = intersect(unique(tmb$patient), unique(freqInfo$patient))
+length(overlap)  ## 77
+tmb = tmb[tmb$patient %in% overlap, ]
+freqInfo = freqInfo[freqInfo$patient %in% overlap, ]
+#
+dat = merge(freqInfo[,c("patient", "cancerType","cluster","Percent")], tmb[,c("patient","TMB","TMB_group")], by="patient")
+dat$TMB_group = factor(dat$TMB_group, levels=c("low","high"))
+```
+
+## correlation
+```{r, fig.width=14, fig.height=15.4}
+###  scatterPlot: correlation
+width = 14
+height = ceiling(length(unique(dat$cluster))/6) * 2.2
+#
+p = ggplot(dat, aes(x=TMB, y=Percent)) + 
+  geom_point(aes(color=cancerType), shape=16) +
+  scale_colour_manual(name="cancerType",values=colSet$cancerType) +
+  stat_cor(size=3) +
+  geom_smooth(method='lm',formula=y~x) +
+  theme_bw() + 
+  facet_wrap(.~cluster, scales="free", ncol=6)
+print(p)
+ggsave(sprintf("%s/freq.FigureS32.TMB_cor.pdf",oDir), p, width=width, height=height)
+```
+
+## forest plot for CD4.c17.TfhTh1.CXCL13
+```{r}
+t.dat = dat[dat$cluster=="CD4.c17.TfhTh1.CXCL13",]
+t.dat$TMB10 = t.dat$TMB/10
+#
+fit = as.formula("Percent ~ cancerType + TMB10")
+lm.out = lm(fit, data=t.dat)
+sum = summary(lm.out)
+tab = as.data.frame(sum$coefficients)
+tab = tab[!grepl("^\\(Intercept\\)$",rownames(tab)),]
+print(sum)
+#
+r2 = sum$r.squared
+adj.r2 = sum$adj.r.squared
+adj.r2.Reg = sprintf("%.2f", adj.r2)
+#
+f = sum$fstatistic
+p = pf(f[1],f[2],f[3], lower.tail=F) %>% unname
+p.Reg = sprintf("%.2f", p)
+#
+tab$pars = rownames(tab)
+tab$pars = gsub("cancerType","cancer:",tab$pars)
+tab = tab[order(tab$Estimate, decreasing=T), ]
+#
+tab$StdErr = tab$`Std. Error`
+tab$p.value = tab$`Pr(>|t|)`
+#
+tab$upper = tab$Estimate + 2*tab$StdErr
+tab$lower = tab$Estimate - 2*tab$StdErr
+tab$sig = ifelse(tab$p.value <0.05, "*", " ")
+tab$Pval = sprintf("%s%s", tab$p.value, tab$sig)
+tab$Info = sprintf("%.1f (%.1f - %.1f)%s", tab$Estimate, tab$lower, tab$upper, tab$sig)
+tab$Estimate = sprintf("%.1f", tab$Estimate)
+tab$StdErr = sprintf("%.1f", tab$StdErr)
+#
+targetRowID = grep("TMB",rownames(tab))
+tab = tab[c(targetRowID, (1:nrow(tab))[-targetRowID]), ]
+tab = rbind(tab[1,], tab[1,], tab[2:nrow(tab),])
+### forest plot
+width = 4.7
+height = 5
+pdf.options(reset=TRUE, onefile=FALSE)
+pdf(sprintf("%s/freq.FigureS32.TMB10_TfhTh1.forest.pdf", oDir), width=width, height=height, onefile=F)
+print(
+  forestplot( rbind(c(c("Variable", NA, "Esitimate (95% CI)")), cbind(tab$pars, NA, tab$Info), 
+    cbind("adjusted R2", NA, adj.r2.Reg),  cbind("P value", NA, p.Reg) ),
+    c(NA,tab$Estimate, NA, NA), c(NA,tab$lower, NA, NA), c(NA,tab$upper, NA, NA),
+      graph.pos=2, xlab="Esitimate", is.summary=c(T, rep(F,nrow(tab)), T, T), boxsize=0.2, 
+      hrzl_lines=T, new_page=T,
+      col=fpColors(box=c("#1c61b6","black"), lines="#1c61b6", zero="gray50"), 
+      lwd.ci=2, ci.vertices=T, ci.vertices.height=0.1,
+      txt_gp=fpTxtGp(label=gpar(cex=0.6), ticks=gpar(cex=0.7), xlab=gpar(cex=0.7), title=gpar(cex=0.7)),
+      xticks=seq(from=floor(min(c(0,tab$lower*1.5))), length.out=5,
+              by=round((ceiling(max(c(0,tab$upper*1.5)))-floor(min(c(0,tab$lower*1.5))))/5, 0))
+    )
+)
+dev.off()
+```
+
+
+# 2. Specific Mutation
+## load mutation files, make the dataframe
+```{r, fig.width=8, fig.height=5}
+# use only TMB-low samples
+pids = tmb[tmb$TMB_group=="low","patient"]
+#
+mut = fread(sprintf("%s/../../data/metaInfo/panC.mutation.mtx.txt.gz", oDir), sep="\t", header=T, check.names=F, stringsAsFactors=F) %>% as.data.frame()
+mut$Gene = gsub("-","_", mut$Gene)
+rownames(mut) = mut$Gene
+#
+flag = mut[,pids]
+flag = ifelse(flag==".", 0, 1)
+mut$Num = rowSums(flag)
+mut$Num.Rate = round(mut$Num/length(pids), 2)
+mut = mut[order(mut$Num, decreasing=T),]
+#
+census = fread(sprintf("%s/../../data/external/Census_all_Wed_Oct_30_07_30_28_2019.GRCh37_COSMICv90.tsv", oDir), sep="\t", header=T, stringsAsFactors=F)
+census$`Gene Symbol` = gsub("-","_", census$`Gene Symbol`)
+
+## choose gene
+# set1: Num.Rate>=mut.rate.cutoff && in Census table
+table(mut$Num)
+genes = mut[mut$Num.Rate >= mut.rate.cutoff, "Gene"]
+genes = genes[genes %in% census$`Gene Symbol`]
+genes = genes[!grepl("[;,]",genes)]
+length(genes)
+if(length(genes)<30){
+  print(genes)
+}
+
+#reshape
+mut = mut[genes, pids]
+mut = as.data.frame(t(ifelse(mut==".", 0, 1)))
+
+dat2 = dcast(freqInfo[,c("patient", "cancerType","cluster","Percent")],  patient + cancerType~ cluster, value.var="Percent")
+clusters = colnames(dat2)[3:ncol(dat2)]
+
+mut$patient = rownames(mut)
+dat2 = merge(dat2, mut, by="patient")
+dat2 = merge(dat2, tmb[,c("patient","TMB","TMB_group")], by="patient")
+dat2$cancerType = factor(dat2$cancerType)
+dat2 = as.data.frame(dat2)
+```
+
+
+## define some easy-used functions
+```{r}
+## 1. fit linear model
+fitLM = function(par.dat2, par.tarClu, par.vars, co.cancerType=TRUE){
+  par.dat2$y = par.dat2[,par.tarClu[1]]
+  if (length(par.tarClu) > 1){
+    for(i in par.tarClu[2:length(par.tarClu)]){
+       par.dat2$y = par.dat2$y + par.dat2[,i]
+    }
+  }
+  #
+  par.dat2 = par.dat2[!is.na(par.dat2$y),]
+  par.dat2$cancerType = par.dat2$cancerType %>% as.character() %>% as.factor
+  ###
+  formula = ""
+  if (co.cancerType==TRUE){
+    formula = as.formula(paste("y ~", paste(c("cancerType", par.vars), collapse='+')))
+  }else{
+    formula = as.formula(paste("y ~", paste( par.vars, collapse='+')))
+  }
+  lm.out = lm(formula, data=par.dat2)
+  return(lm.out)
+}
+
+
+## 2. show LM model info
+summaryLM = function(par.tarClu, par.lm, par.dir, sc.gene=NA, plot=TRUE){
+  sum = summary(par.lm)
+  tab = as.data.frame(sum$coefficients)
+  tab = tab[!grepl("^\\(Intercept\\)$",rownames(tab)),]
+  #print(sum)
+  #
+  r2 = sum$r.squared
+  adj.r2 = sum$adj.r.squared
+  adj.r2.Reg = sprintf("%.2f", adj.r2)
+  #
+  f = sum$fstatistic
+  p = pf(f[1],f[2],f[3], lower.tail=F) %>% unname
+  p.Reg = sprintf("%.2f", p)
+  #
+  
+  tab$Gene = rownames(tab)
+  tab$Gene = gsub("cancerType","cancer:",tab$Gene)
+  tab$Gene = gsub("TMB_group","TMB:",tab$Gene)
+  tab = tab[order(tab$Estimate, decreasing=T), ]
+  #
+  tab$StdErr = tab$`Std. Error`
+  tab$p.value = tab$`Pr(>|t|)`
+  #
+  tab$upper = tab$Estimate + 2*tab$StdErr
+  tab$lower = tab$Estimate - 2*tab$StdErr
+  tab$sig = ifelse(tab$p.value <0.05, "*", " ")
+  tab$Pval = sprintf("%s%s", tab$p.value, tab$sig)
+  tab$Info = sprintf("%.1f (%.1f - %.1f)%s", tab$Estimate, tab$lower, tab$upper, tab$sig)
+  tab$Estimate = sprintf("%.1f", tab$Estimate)
+  tab$StdErr = sprintf("%.1f", tab$StdErr)
+
+  # forestplot
+  if (plot==TRUE){
+    len = max(nchar(tab$Gene))
+    width = 4 + 0.005*len
+    height = 1 + nrow(tab)*0.5
+    if (is.na(sc.gene)){
+      pdf(sprintf("%s/%s.forest.pdf", par.dir, par.tarClu), width=width, height=height, onefile=F)
+    }else{
+      pdf(sprintf("%s/%s_%s.forest.pdf", par.dir, par.tarClu, sc.gene), width=width, height=height, onefile=F)
+    }
+    print(
+      forestplot( rbind(c(c("Variable", NA, "Esitimate (95% CI)")), cbind(tab$Gene, NA, tab$Info), 
+                      cbind("adjusted R2", NA, adj.r2.Reg),  cbind("P value", NA, p.Reg) ),
+        c(NA,tab$Estimate, NA, NA), c(NA,tab$lower, NA, NA), c(NA,tab$upper, NA, NA),
+        graph.pos=2, xlab="Esitimate", is.summary=c(T, rep(F,nrow(tab)), T, T), boxsize=0.2, 
+        hrzl_lines=T, new_page=T,
+        col=fpColors(box=c("#1c61b6","black"), lines="#1c61b6", zero="gray50"), 
+        lwd.ci=2, ci.vertices=T, ci.vertices.height=0.1,
+        txt_gp=fpTxtGp(label=gpar(cex=0.5), ticks=gpar(cex=0.7), xlab=gpar(cex=0.7), title=gpar(cex=0.7)),
+        xticks=seq(from=floor(min(c(0,tab$lower*1.5))), length.out=5,
+                  by=round((ceiling(max(c(0,tab$upper*1.5)))-floor(min(c(0,tab$lower*1.5))))/5, 1))
+      )
+    )
+    dev.off()
+  }
+  
+  # return
+  res = c()
+  if(is.na(sc.gene)){
+    res = c(tarClu, r2, adj.r2, p)
+  }else{
+    res = c(tarClu, sc.gene, tab[sc.gene,"Estimate"], tab[sc.gene,"Pr(>|t|)"], r2, adj.r2, p)
+  }
+  return(res)
+}
+```
+
+
+## lm for each gene
+```{r fig.height=4.5, fig.width=6.5, message=FALSE, warning=FALSE, include=FALSE}
+lm.res = as.data.frame(matrix(NA, nrow=0, ncol=9))
+#test.genes = genes
+#test.clusters = clusters
+test.genes = "FAT1"
+test.clusters = "CD4.c20.Treg.TNFRSF9"
+#
+test.dir = sprintf("%s/freq.cluster_gene.forest/", oDir)
+dir.create(test.dir, F, T)
+for (tarClu in test.clusters){
+  these = as.data.frame(matrix(NA, nrow=0, ncol=7))
+  for (gene in test.genes){
+    # calculate flag
+    tmp = dat2[,c(tarClu, gene)]
+    tmp = tmp[!is.na(tmp[,tarClu]),]
+    flag = tmp[,gene] %>% sum()
+    flag = (flag!=0 & flag!=nrow(tmp))
+    # run
+    if (flag){
+      lm.out = fitLM(dat2, tarClu, gene)
+      this = summaryLM( tarClu, lm.out, test.dir, sc.gene=gene )
+      
+    }
+    else{
+      this = c(tarClu, gene, NA, NA, NA, NA, NA)
+    }
+    this = as.data.frame(t(this), stringsAsFactors=F)
+    colnames(this) = c("Cluster", "Gene", "Estimate", "esti.P.val", "R2", "adj.R2", "P.val")
+    these = rbind(these, this, stringsAsFactors=F)
+  }
+  ##
+  these$adj.esti.P.val = p.adjust(these$esti.P.val, method="BH")
+  these$adj.P.val = p.adjust(these$P.val, method="BH")
+  lm.res = rbind(lm.res, these, stringsAsFactors=F)
+}
+write.table(lm.res, file=sprintf("%s/freq.cluster_gene.forest/Gene_lm.txt",oDir), sep="\t", quote=F, col.names=T, row.names=F)
+```

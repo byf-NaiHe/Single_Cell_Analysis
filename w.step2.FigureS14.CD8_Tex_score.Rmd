@@ -1,0 +1,196 @@
+---
+title: "R Notebook"
+output: html_notebook
+fig_width: 6
+fig_height: 6
+---
+
+# 0-1. Lord the packages, the data, etc.
+```{r}
+suppressPackageStartupMessages({
+library("SingleCellExperiment")
+library("Seurat")
+library("sscClust")
+library("grid")
+library("reshape2")
+library("stringr")
+library("plyr")
+library("dplyr")
+library("ggpubr")
+library("ggrastr")
+library("png")
+library("data.table")
+})
+stype = "CD8"
+oDir = normalizePath("./OUT_FigS14", mustWork=F)
+dir.create(sprintf("%s", oDir), F, T)
+#
+colSet = readRDS(sprintf("%s/../../data/metaInfo/panC.colSet.list.rds",oDir))
+colSet[['cluster.name']] = colSet[['cluster.name.short.CD8']]
+```
+
+# 0-2. define function
+```{r}
+convertDPTperc = function(.dat){
+  .dat = .dat[order(.dat$dpt_pseudotime), ]
+  .dat$dpt_order = 1:nrow(.dat)
+  .dat$dpt_order_perc = .dat$dpt_order / max(.dat$dpt_order)
+  return(.dat)
+}
+
+
+DoPlot = function(.dat, .outfile, y="Exhaust.Score.manual", color.by="meta.cluster"){
+    .dat = convertDPTperc(.dat)
+    .dat$Exhaust.Score = .dat[,y]
+    if(!is.null(color.by)){
+      .dat$group = .dat[,color.by]
+    }
+    #
+    width = 6
+    height = 3
+    p = ggplot(.dat, aes(x=dpt_order_perc, y=Exhaust.Score))
+    if(!is.null(color.by)){
+      p = p + geom_point_rast(aes(color=group), shape=16, size=1, alpha=0.5,  raster.dpi=300) +
+            scale_colour_manual(values=colSet[[color.by]][unique(.dat[[color.by]])])
+      width = width + 1.5
+    }else{
+      p = p + geom_point_rast(shape=16, size=1,  raster.dpi=300)
+    }
+    p = p + stat_cor(size=3) +
+          geom_smooth(color="black", size=1, method="loess", formula=y~x, se=F) +
+          theme_bw() +
+          ggtitle(sprintf("%s, %s", "Exhaust.Score", y))
+    #
+    ggsave(file=.outfile, p, width=width, height=height, useDingbats=F)
+    print(p)
+    return()
+}
+```
+
+
+# 1-1. boxplot for dpt of two paths
+```{r fig.height=3.5, fig.width=4}
+# dpt_pseudotime
+dpt = fread(sprintf("%s/../../data/metaInfo/%s_Tex.dpt_pseudotime.txt.gz", oDir,stype), header=T, stringsAsFactors=F, sep="\t")
+#
+dat = convertDPTperc(dpt)
+dat$meta.cluster = factor(as.character(dat$meta.cluster), levels=rev(unique(dat$meta.cluster)))
+dat$group = ifelse(as.character(dat$meta.cluster) %in% c("CD8.c01.Tn.MAL", "CD8.c02.Tm.IL7R"), "Tn/Tm", "Tex")
+dat$group = ifelse(as.character(dat$meta.cluster) %in% c("CD8.c05.Tem.CXCR5","CD8.c06.Tem.GZMK","CD8.c11.Tex.PDCD1"),"P1",dat$group)
+dat$group = ifelse(as.character(dat$meta.cluster) %in% c("CD8.c10.Trm.ZNF683"),"P2",dat$group)
+dat$group = factor(dat$group, levels=c("Tn/Tm","P1","P2", "ISG","Tex"))
+#
+p = ggplot(dat, aes(x=meta.cluster, color=meta.cluster, y=dpt_order_perc)) + 
+      geom_boxplot(outlier.shape=NA) +
+      geom_point(alpha=0.35, size=0.35, shape=16, position=position_jitter(width=0.2, height=0)) +
+      theme_bw() +
+      theme(axis.text.x=element_text(size=8), legend.position="none") +
+      scale_color_manual(values=colSet$meta.cluster) + 
+      coord_flip() + 
+      facet_grid (group~., scales="free", space="free", drop=T)
+print(p)
+ggsave(p, file=sprintf("%s/%s_Tex.FigureS13.dpt_pseudotime.boxplot.pdf",oDir,stype), width=4,height=3.5)
+```
+
+
+
+# 1-2. calculate Tex score for each cell
+```{r}
+if (T){
+# meta
+meta = readRDS(sprintf("%s/../../data/metaInfo/int.CD8.S35.meta.tb.rds", oDir))
+meta = meta[dataset.tech=="zhangLab5P",]
+setkey(meta, "cellID")
+
+# dpt_pseudotime
+dpt = fread(sprintf("%s/../../data/metaInfo/%s_Tex.dpt_pseudotime.txt.gz", oDir,stype), header=T, stringsAsFactors=F, sep="\t")
+dpt = as.data.frame(dpt) %>% tibble::column_to_rownames("V1")
+meta = meta[miniCluster %in% rownames(dpt),]
+meta$dpt_pseudotime = dpt[meta$miniCluster, "dpt_pseudotime"]
+
+# redim
+redim = fread(sprintf("%s/../../data/metaInfo/%s_Tex.umap_harmony.txt.gz", oDir,stype), header=T, stringsAsFactors=F, sep="\t")
+redim = as.data.frame(redim) %>% tibble::column_to_rownames("V1")
+meta$UMAP1 = redim[meta$miniCluster, "harmony.umap_1"]
+meta$UMAP2 = redim[meta$miniCluster, "harmony.umap_2"]
+
+# cluster name
+nam.conv = fread(sprintf("%s/../../data/metaInfo/name.conversion.txt",oDir),sep="\t",stringsAsFactors=F,header=T)
+nam.conv = as.data.frame(nam.conv)
+rownames(nam.conv) = nam.conv$meta.cluster
+meta$cluster.name = nam.conv[as.character(meta$meta.cluster),"cluster.name"]
+
+# Tex markers (signature top50)
+sig =  fread(sprintf("%s/../../data/metaInfo/signature_genes.txt.gz", oDir), header=F, stringsAsFactors=F, sep="\t") %>% as.data.frame()
+colnames(sig) = c("meta.cluster","geneSymbol")
+Tex.markers.sig50 = sig[as.character(sig$meta.cluster)=="CD8.c12.Tex.CXCL13","geneSymbol"]
+
+# seu and calculate
+seu = readRDS(sprintf("%s/../../data/expression/%s/integration/%s.thisStudy_10X.seu.rds", oDir, stype, stype))
+seu = seu[,meta$cellID]
+seu = AddModuleScore(seu, features=list(Tex.markers.sig50), name="Exhaust.Score")
+meta$Exhaust.Score = seu$Exhaust.Score1
+
+saveRDS(meta, sprintf("%s/%s_Tex.cellInfo_TexScore.tb.rds", oDir, stype))
+
+}else{
+meta = readRDS(sprintf("%s/%s_Tex.cellInfo_TexScore.tb.rds", oDir, stype))
+}
+```
+
+# 1-3. convert to miniC
+```{r}
+if(T){
+# tidy
+meta = readRDS(sprintf("%s/%s_Tex.cellInfo_TexScore.tb.rds", oDir, stype))
+tmp1 = meta[,c("miniCluster","meta.cluster","cluster.name","dpt_pseudotime","UMAP1","UMAP2")] %>% unique() %>% as.data.frame()
+tmp2 = aggregate(cbind(Exhaust.Score) ~ miniCluster,
+                 meta[,c("miniCluster","Exhaust.Score")], mean)
+dat = base::merge(tmp1,tmp2,by="miniCluster")
+
+# get UMAP centroid
+quantile.list = list()
+for (i in sort(unique(as.character(dat$meta.cluster)))){
+    quantile.list[[i]] = apply(dat[as.character(dat$meta.cluster)==i, c("UMAP1","UMAP2")], 2, quantile)
+}
+quantile.list[['all']] = apply(dat[, c("UMAP1","UMAP2")], 2, quantile)
+
+# add group
+clu.p1 = c("CD8.c01.Tn.MAL","CD8.c02.Tm.IL7R","CD8.c05.Tem.CXCR5","CD8.c06.Tem.GZMK","CD8.c11.Tex.PDCD1","CD8.c12.Tex.CXCL13")
+clu.p2 = c("CD8.c01.Tn.MAL","CD8.c02.Tm.IL7R","CD8.c10.Trm.ZNF683","CD8.c12.Tex.CXCL13")
+dat$group = "Others"
+dat[  dat$meta.cluster %in% clu.p1 &
+      dat$UMAP1 <= quantile.list[["all"]]["50%","UMAP1"] &
+      dat$UMAP2 <=  quantile.list[["CD8.c01.Tn.MAL"]]["50%","UMAP2"], "group"] = "P1"
+dat[  dat$meta.cluster %in% clu.p1 &
+      dat$UMAP1 > quantile.list[["all"]]["50%","UMAP1"] &
+      dat$UMAP2 <=  quantile.list[["CD8.c12.Tex.CXCL13"]]["50%","UMAP2"], "group"] = "P1"
+dat[  dat$meta.cluster %in% clu.p2 &
+      dat$UMAP1 <= quantile.list[["all"]]["50%","UMAP1"] &
+      dat$UMAP2 >  quantile.list[["CD8.c01.Tn.MAL"]]["50%","UMAP2"], "group"] = "P2"
+dat[  dat$meta.cluster %in% clu.p2 &
+      dat$UMAP1 > quantile.list[["all"]]["50%","UMAP1"] &
+      dat$UMAP2 >  quantile.list[["CD8.c12.Tex.CXCL13"]]["50%","UMAP2"], "group"] = "P2"
+
+saveRDS(dat, sprintf("%s/%s_Tex.miniInfo_TexScore.tb.rds", oDir, stype))
+
+}else{
+dat = readRDS(sprintf("%s/%s_Tex.miniInfo_TexScore.tb.rds", oDir, stype))
+}
+```
+
+
+
+
+# 2. plots
+## P1
+```{r,fig.width=7.5,fig.height=3}
+outfile = sprintf("%s/%s_Tex.TexScore.P1.pdf", oDir, stype)
+DoPlot(dat[dat$group=="P1",], outfile, y="Exhaust.Score")
+```
+
+## P2
+```{r,fig.width=7.5,fig.height=3}
+outfile = sprintf("%s/%s_Tex.TexScore.P2.pdf", oDir, stype)
+DoPlot(dat[dat$group=="P2",], outfile, y="Exhaust.Score")
+```

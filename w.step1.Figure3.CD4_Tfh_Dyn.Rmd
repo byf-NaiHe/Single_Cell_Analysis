@@ -1,0 +1,167 @@
+---
+title: "R Notebook"
+output: html_notebook
+fig_width: 6
+fig_height: 6
+---
+
+# 0. preparation
+## 0-1. Lord the packages, the data, etc.
+```{r}
+suppressPackageStartupMessages({
+library("reshape2")
+library("stringr")
+library("plyr")
+library("dplyr")
+library("ggpubr")
+library("ggsci")
+library("ggrastr")
+library("ggvenn")
+library("data.table")
+library("sscClust")
+library("gam")
+library("colorRamps")
+library("clusterProfiler")
+library("org.Hs.eg.db")
+})
+stype = "CD4"
+oDir = sprintf("%s/OUT_Fig3",getwd())
+dir.create(sprintf("%s/",oDir), F, T)
+doParallel::registerDoParallel(cores=16)
+#
+source(sprintf("%s/../source_dyn_func.R",oDir))
+colSet = readRDS(sprintf("%s/../../data/metaInfo/panC.colSet.list.rds",oDir))
+#
+tfs = read.table(sprintf("%s/../../data/external/transcription.factor.activity.GO0003700.list", oDir), header=T, row.names=1, stringsAsFactors=F, sep="\t")
+tfs = unique(tfs$geneSymbol)
+```
+
+
+# 1.Tfh
+### preprocess
+```{r, fig.width=5, fig.height=3}
+if (T){
+  # diffmap
+  diffmap = fread(sprintf("%s/../../data/metaInfo/%s_Tfh.diffMap.txt.gz", oDir,stype), header=T, stringsAsFactors=F, sep="\t")
+  diffmap = diffmap[,c("V1","1","2")] %>% as.data.frame() %>% tibble::column_to_rownames("V1")
+  colnames(diffmap) = c("DC1","DC2")
+  
+  # dpt_pseudotime
+  dpt = fread(sprintf("%s/../../data/metaInfo/%s_Tfh.dpt_pseudotime.txt.gz", oDir,stype), header=T, stringsAsFactors=F, sep="\t")
+  diffmap$dpt_pseudotime = dpt$dpt_pseudotime
+  
+  ## modified sce
+  sce = readRDS(sprintf("%s/../../data/expression/CD4/integration/int.%s.S35.sce.merged.rds",oDir,stype))
+  sce = sce[,rownames(diffmap)]
+  reducedDim(sce, "diffmap") = diffmap[,c("DC1","DC2")]
+  sce$dpt_pseudotime = diffmap$dpt_pseudotime
+  sce$meta.cluster = as.character(sce$meta.cluster)
+  #
+  sce = convertDPTperc(sce)
+  #
+  nam.conv = fread(sprintf("%s/../../data/metaInfo/name.conversion.txt",oDir),sep="\t",stringsAsFactors=F,header=T)
+  nam.conv = as.data.frame(nam.conv)
+  rownames(nam.conv) = nam.conv$meta.cluster
+  sce$cluster.name = nam.conv[as.character(sce$meta.cluster),"cluster.name"]
+  #
+  saveRDS(sce, file=sprintf("%s/%s_Tfh.sce.add_info.rds",oDir,stype))
+}
+
+####
+sce = readRDS(sprintf("%s/%s_Tfh.sce.add_info.rds",oDir,stype))
+```
+
+
+### density
+```{r fig.height=3, fig.width=7}
+dat = colData(sce)[,c("dpt_pseudotime","dpt_order_perc","meta.cluster")] %>% as.data.frame
+p = ggplot(dat, aes(x=dpt_order_perc, fill=meta.cluster)) +
+      geom_density(size=0.2, adjust=1.5, n=50, trim=F, color="black", alpha=0.75) +
+      theme_classic2() +
+      scale_fill_manual(values=colSet$meta.cluster[unique(dat$meta.cluster)])
+print(p)
+dens_p = p + theme_void() + theme(plot.margin=margin(t=0,r=0,b=0,l=0,unit="cm"), legend.position="none") + xlim(c(0,1)) 
+```
+
+
+### DEG
+```{r fig.height=3, fig.width=7, message=FALSE, warning=FALSE}
+if (T){
+  gam.test = testProcess(sce, tfs)
+  saveRDS(gam.test, file=sprintf("%s/%s_Tfh.dyn_genes.rds",oDir,stype))
+}else{
+  gam.test = readRDS(sprintf("%s/%s_Tfh.dyn_genes.rds",oDir,stype))
+}
+```
+
+
+### heatmap
+```{r, fig.width=8, fig.height=7}
+p.cutoff = 0.01
+c.cutoff = 0.5
+#
+gam.test$sig = ifelse(gam.test$adj.p < p.cutoff & abs(gam.test$coef) > c.cutoff, T, F)
+#
+plot.gene = as.character(gam.test[gam.test$sig, "geneSymbol"])
+highlight.genes = c("TCF7","CXCR5","IL6R","ZBTB10",
+                    "RBPJ","ZEB2","BHLHE40","ZBED2","ID2", "TP73",
+                    "IFNG","HAVCR2","LAG3","PRF1","CCL5","GZMA","GZMH","RUNX3")
+annot=rowAnnotation(gene=anno_mark(at=match(highlight.genes, plot.gene), labels=highlight.genes))
+colSet[['dpt_order_perc']]=colorRamp2(c(0,max(sce$dpt_order_perc)),c("white","darkblue"))
+colSet[['cluster.name']] = structure(nam.conv$mcolor, names=nam.conv$cluster.name)
+#
+set.seed(1)
+sce$meta.cluster = as.character(sce$meta.cluster)
+sce$cluster.name = as.character(sce$cluster.name)
+sce$cluster.name = factor(sce$cluster.name, 
+                            levels=nam.conv[nam.conv$meta.cluster %in% unique(sce$meta.cluster),"cluster.name"])
+hm.obj = heatmap_sm(sce[plot.gene,], assay.name="exprs",
+                 colSet=colSet,
+                 out.prefix=sprintf("%s/%s_Tfh.dyn_genes.heatmap", oDir, stype),
+                 columns=c("dpt_order_perc"), 
+                 ncell.downsample=500,
+                 use_raster=T, raster_quality=2,
+                 columns.order="dpt_order_perc",
+                 show_column_names=F, show_row_names=F,
+                 row_names_side="right",
+                 row_gap = unit(1, "mm"), column_gap = unit(0, "mm"),
+                 border=F, ann.bar.height=0.5, palette.name="blue2green2red",
+                 pdf.width=10.5, pdf.height=7, do.scale=F,
+                 z.lo=-0.5, z.hi=1.5, z.step=0.25, 
+                 do.clustering.row=T, do.clustering.col=F,
+                 dend.row=T,  right_annotation=annot,
+                 clustering.distance="cosine",
+                 clustering.method="ward.D2",
+                 #row_split=5
+                 row_km=5, row_km_repeats=100, #row_title=NULL
+                 )
+print(hm.obj)
+```
+
+
+```{r, fig.width=7, fig.height=5}
+pdf(sprintf("%s/%s_Tfh.dyn_genes.heatmap_addDensity.pdf", oDir, stype), width=7.8, height=6)
+HeatmapAnnotation(ggplot=anno_empty(height=unit(1.2, "cm")), which="column") %v% hm.obj
+
+decorate_annotation("ggplot", {
+	vp = current.viewport()$name
+	print(dens_p, vp=vp)
+})
+dev.off()
+```
+
+
+### highlight genes
+```{r fig.height=3, fig.width=7.5, message=FALSE, warning=FALSE}
+genes = c("RUNX3","TP73")
+#
+for(gene in genes){
+  p = plotONEgene(gene, sce, colSet)
+  print(p)
+  ggsave(p, file=sprintf("%s/%s_Tfh.FigureS25.dyn_genes.%s.pdf", oDir, stype, gene), width=7.5,height=3)
+}
+```
+
+
+
+
