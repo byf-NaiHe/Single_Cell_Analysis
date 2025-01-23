@@ -1,0 +1,145 @@
+---
+title: "R Notebook"
+output: html_notebook
+fig_width: 6 
+fig_height: 6
+---
+
+# Lord the packages, the data, etc.
+```{r}
+suppressPackageStartupMessages({
+library("SingleCellExperiment")
+library("Seurat")
+library("sscClust")
+library("grid")
+library("reshape2")
+library("stringr")
+library("plyr")
+library("dplyr")
+library("ggpubr")
+library("monocle3")
+library("ggrastr")
+library("zoo")
+library("rlang")
+library("png")
+})
+stype = "CD4"
+odir = normalizePath("./OUT_FigS25", mustWork=F)
+dir.create(sprintf("%s", odir), F, T)
+
+colSet = readRDS(sprintf("%s/../../data/metaInfo/panC.colSet.list.rds", odir))
+#
+sce = readRDS(sprintf("%s/../../data/expression/%s/integration/int.%s.S35.sce.merged.rds", odir,stype,stype))
+#
+keep_clus = c("CD4.c16.Tfh.CXCR5", "CD4.c17.TfhTh1.CXCL13")
+sce = sce[,as.character(sce$meta.cluster) %in% keep_clus]
+```
+
+```{r, fig.width=6, fig.height=5}
+mat = as(assay(sce,"exprs"), 'sparseMatrix')
+mat[is.na(mat)] = 0
+
+cellInfo = colData(sce) %>% as.data.frame
+geneInfo = data.frame(gene_short_name=row.names(mat), row.names=row.names(mat))
+rownames(mat) = NULL
+colnames(mat) = NULL
+cds = new_cell_data_set(expression_data=mat, cell_metadata=cellInfo, gene_metadata=geneInfo)
+#
+colData(cds) = colData(cds)[,!grepl("^RNA_",colnames(colData(cds)))]
+#
+cds = preprocess_cds(cds, num_dim=50, norm_method="none", scaling=F)
+#
+reducedDim(cds, "PCA") = reducedDim(sce, "harmony")
+reducedDim(cds, "UMAP") = reducedDim(sce, "harmony.umap")
+
+##### remove some outlier from umap
+tmp = reducedDim(cds, "UMAP")
+cds = cds[, tmp[,1]>-3 & tmp[,1]<5 & tmp[,2]<0 ]
+#####
+
+###
+plot_cells(cds, color_cells_by="meta.cluster", 
+           label_groups_by_cluster=FALSE, 
+           reduction_method="UMAP", 
+           group_label_size=3.5, 
+           cell_size=0.5, 
+           show_trajectory_graph=F) + 
+  scale_colour_manual(values=colSet$meta.cluster)
+```
+
+
+
+## Cluster the cells
+```{r, fig.width=4.5, fig.height=4}
+cds = cluster_cells(cds)
+plot_cells(cds, color_cells_by = "partition")
+plot_cells(cds, color_cells_by = "cluster")
+```
+
+
+
+## Learn the trajectory graph
+```{r fig.height=4, fig.width=5}
+cds = learn_graph(cds,learn_graph_control=list(minimal_branch_len=8))
+##
+width=5
+height=4
+#
+p = plot_cells(cds,
+           color_cells_by = "meta.cluster",
+           label_groups_by_cluster=F,
+           label_roots=F,
+           label_leaves=F,
+           label_branch_points=F,
+           cell_size=0.5, 
+           #graph_label_size=2,
+           group_label_size=3,
+           rasterize=F) + 
+  scale_colour_manual(values=colSet$meta.cluster)
+print(p)
+```
+
+## order cells
+```{r fig.height=4, fig.width=5.5}
+start = c("CD4.c16.Tfh.CXCR5")
+#
+closest_vertex = cds@principal_graph_aux[["UMAP"]]$pr_graph_cell_proj_closest_vertex
+closest_vertex = as.matrix(closest_vertex[colnames(cds), ])
+root_pr_nodes = igraph::V(principal_graph(cds)[["UMAP"]])$name
+#
+flag = closest_vertex[as.character(colData(cds)$meta.cluster) %in% start,]
+flag = as.numeric(names(which.max(table( flag ))))
+root_pr_nodes = root_pr_nodes[flag]
+#
+cds = order_cells(cds, root_pr_nodes=root_pr_nodes )
+##
+width=5.5
+height=4
+#
+p = plot_cells(cds,
+           color_cells_by = "pseudotime",
+           label_cell_groups=F,
+           label_groups_by_cluster=F,
+           label_roots=F,
+           label_leaves=F,
+           label_branch_points=F,
+           cell_size=0.5,
+           show_trajectory_graph=F,
+           group_label_size=3,
+           rasterize=F)
+print(p)
+ggsave(p, file=sprintf("%s/%s_Tfh.umap_M3pseudotime.pdf", odir, stype),
+       width=width, height=height, useDingbats=F)
+```
+
+
+```{r}
+time = pseudotime(cds)
+time[time==Inf] = 0 
+time = data.frame(miniCluster=names(time), pseudotime=time)
+write.table(time, file=sprintf("%s/%s_Tfh.monocle3_pseudotime.txt",odir,stype),
+            sep="\t", quote=F, col.names=T, row.names=F)
+#
+saveRDS(cds, file=sprintf("%s/%s_Tfh.monocle3.rds",odir,stype))
+```
+

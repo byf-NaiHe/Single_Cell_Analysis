@@ -1,0 +1,380 @@
+---
+title: "R Notebook"
+output: html_notebook
+fig_width: 6
+fig_height: 6
+---
+
+# 0. preparation
+## 0-1. Lord the packages, the data, etc.
+```{r}
+suppressPackageStartupMessages({
+library("reshape2")
+library("stringr")
+library("plyr")
+library("dplyr")
+library("ggpubr")
+library("ggsci")
+library("ggrastr")
+library("ggvenn")
+library("data.table")
+library("sscClust")
+library("gam")
+library("colorRamps")
+library("clusterProfiler")
+library("org.Hs.eg.db")
+})
+stype = "CD8"
+oDir = normalizePath("./OUT_FigS24", mustWork=F)
+dir.create(sprintf("%s/",oDir), F, T)
+doParallel::registerDoParallel(cores=16)
+#
+source(sprintf("%s/../source_dyn_func.R",oDir))
+colSet = readRDS(sprintf("%s/../../data/metaInfo/panC.colSet.list.rds",oDir))
+#
+tfs = read.table(sprintf("%s/../../data/external/transcription.factor.activity.GO0003700.list", oDir), header=T, row.names=1, stringsAsFactors=F, sep="\t")
+tfs = unique(tfs$geneSymbol)
+```
+
+
+# 1. SCE process
+## 1-1. read diffmap, and modified sce file
+```{r, fig.width=5, fig.height=3}
+if (T){
+# diffmap
+diffmap = fread(sprintf("%s/../../data/metaInfo/%s_Tex.diffMap.txt.gz", oDir,stype), header=T, stringsAsFactors=F, sep="\t")
+diffmap = diffmap[,c("V1","1","2")] %>% as.data.frame() %>% tibble::column_to_rownames("V1")
+colnames(diffmap) = c("DC1","DC2")
+
+# dpt_pseudotime
+dpt = fread(sprintf("%s/../../data/metaInfo/%s_Tex.dpt_pseudotime.txt.gz", oDir,stype), header=T, stringsAsFactors=F, sep="\t")
+diffmap$dpt_pseudotime = dpt$dpt_pseudotime
+
+## modified sce
+sce = readRDS(sprintf("%s/../../data/expression/CD8/integration/int.CD8.S35.HVG.continumOnly.v1.sce.Path.rds",oDir))
+sce = sce[,rownames(diffmap)]
+reducedDim(sce, "diffmap") = diffmap[,c("DC1","DC2")]
+sce$dpt_pseudotime = diffmap$dpt_pseudotime
+sce$meta.cluster = as.character(sce$meta.cluster)
+#
+sce = convertDPTperc(sce)
+#
+nam.conv = fread(sprintf("%s/../../data/metaInfo/name.conversion.txt",oDir),sep="\t",stringsAsFactors=F,header=T)
+nam.conv = as.data.frame(nam.conv)
+rownames(nam.conv) = nam.conv$meta.cluster
+sce$cluster.name = nam.conv[as.character(sce$meta.cluster),"cluster.name"]
+#
+saveRDS(sce, file=sprintf("%s/%s_Tex.sce.add_info.rds",oDir,stype))
+}
+
+####
+sce = readRDS(sprintf("%s/%s_Tex.sce.add_info.rds",oDir,stype))
+```
+
+
+## 1-2. find centroid and assign groups
+```{r}
+## get quantile
+quantile.list = list()
+for (i in sort(unique(sce$meta.cluster))){
+    this = apply(reducedDim(sce[,as.character(sce$meta.cluster)==i], "recal.harmony.umap"), 2, quantile)
+    colnames(this) = c("UMAP1","UMAP2")
+    quantile.list[[i]] = this
+}
+```
+
+
+```{r}
+# path1.start
+clu.1s = c("CD8.c01.Tn.MAL","CD8.c02.Tm.IL7R","CD8.c05.Tem.CXCR5","CD8.c06.Tem.GZMK")
+umap.1s = reducedDim(sce[,as.character(sce$meta.cluster) %in% clu.1s & sce$dpt_order_perc < 0.4], "recal.harmony.umap")
+miniC.1s = umap.1s[  umap.1s[,1] > quantile.list[["CD8.c01.Tn.MAL"]]["50%","UMAP1"]  &
+                     umap.1s[,1] < quantile.list[["CD8.c05.Tem.CXCR5"]]["50%","UMAP1"]  &
+                     umap.1s[,2] < quantile.list[["CD8.c01.Tn.MAL"]]["50%","UMAP2"]
+                     ,  ]  %>% rownames
+
+# path1.end
+clu.1e = c("CD8.c06.Tem.GZMK","CD8.c11.Tex.PDCD1","CD8.c12.Tex.CXCL13")
+umap.1e = reducedDim(sce[,as.character(sce$meta.cluster) %in% clu.1e & sce$dpt_order_perc > 0.6], "recal.harmony.umap")
+miniC.1e = umap.1e[  umap.1e[,1] > quantile.list[["CD8.c06.Tem.GZMK"]]["50%","UMAP1"]  & 
+                     umap.1e[,1] < quantile.list[["CD8.c12.Tex.CXCL13"]]["50%","UMAP1"]  &
+                     umap.1e[,2] < quantile.list[["CD8.c12.Tex.CXCL13"]]["50%","UMAP2"]
+                     ,  ]  %>% rownames
+
+# path2.start
+clu.2s = c("CD8.c01.Tn.MAL","CD8.c02.Tm.IL7R","CD8.c10.Trm.ZNF683")
+umap.2s = reducedDim(sce[,as.character(sce$meta.cluster) %in% clu.2s & sce$dpt_order_perc < 0.4], "recal.harmony.umap")
+miniC.2s = umap.2s[  umap.2s[,1] > quantile.list[["CD8.c01.Tn.MAL"]]["50%","UMAP1"]  & 
+                     umap.2s[,1] < quantile.list[["CD8.c10.Trm.ZNF683"]]["25%","UMAP1"]   &
+                     umap.2s[,2] > quantile.list[["CD8.c01.Tn.MAL"]]["50%","UMAP2"]
+                     ,  ]  %>% rownames
+
+# path2.end
+clu.2e = c("CD8.c10.Trm.ZNF683","CD8.c12.Tex.CXCL13")
+umap.2e = reducedDim(sce[,as.character(sce$meta.cluster) %in% clu.2e & sce$dpt_order_perc > 0.6], "recal.harmony.umap")
+miniC.2e = umap.2e[  umap.2e[,1] > quantile.list[["CD8.c10.Trm.ZNF683"]]["75%","UMAP1"]  & 
+                     umap.2e[,1] < quantile.list[["CD8.c12.Tex.CXCL13"]]["50%","UMAP1"]  &
+                     umap.2e[,2] > quantile.list[["CD8.c12.Tex.CXCL13"]]["50%","UMAP2"]
+                     ,  ]  %>% rownames
+```
+
+```{r}
+if(T){
+sce$group = ifelse(colnames(sce) %in%  miniC.1s, "P1.start", "Other")
+sce$group = ifelse(colnames(sce) %in%  miniC.1e, "P1.end", sce$group)
+sce$group = ifelse(colnames(sce) %in%  miniC.2s, "P2.start", sce$group)
+sce$group = ifelse(colnames(sce) %in%  miniC.2e, "P2.end", sce$group)
+}
+colSet$group = structure(names=c("P1.start","P1.end","P2.start","P2.end","Other"),
+                         c("#90EE90","#228B22", "#87CEFA", "#1E90FF", "lightgrey"))
+ssc.plot.tsne(sce, reduced.name="recal.harmony.umap", columns="group", colSet=colSet, base_aspect_ratio=1.5)
+```
+
+
+
+
+
+## 1-3. save RDS
+```{r}
+saveRDS(sce, file=sprintf("%s/%s_Tex.sce.add_info.rds",oDir,stype))
+write.table(colData(sce)[,"group",drop=F], file=sprintf("%s/%s_Tex.transit_groups.txt",oDir,stype), sep="\t", quote=F, col.names=F)
+```
+
+
+
+# 2. Test Genes
+## 2-1. P1.start
+```{r}
+sce.1s = sce[,as.character(sce$group)=="P1.start"]
+gam.1s = testProcess(sce.1s, tfs)
+```
+
+
+## 2-2. P1.end
+```{r}
+sce.1e = sce[,as.character(sce$group)=="P1.end"]
+gam.1e = testProcess(sce.1e, tfs)
+```
+
+
+## 2-3. P2.start
+```{r}
+sce.2s = sce[,as.character(sce$group)=="P2.start"]
+gam.2s = testProcess(sce.2s, tfs)
+```
+
+
+
+## 2-4. P2.end
+```{r}
+sce.2e = sce[,as.character(sce$group)=="P2.end"]
+gam.2e = testProcess(sce.2e, tfs)
+```
+
+
+
+## 2-5 save
+```{r}
+save(sce.1s, sce.1e, sce.2s, sce.2e,
+     gam.1s, gam.1e, gam.2s, gam.2e,
+     file=sprintf("%s/%s_Tex.dyn_genes.rda",oDir,stype))
+```
+
+
+# 3. Overlap
+## 3-1. significant genes
+```{r}
+sce = readRDS(sprintf("%s/%s_Tex.sce.add_info.rds",oDir,stype))
+load(sprintf("%s/%s_Tex.dyn_genes.rda",oDir,stype))
+```
+
+```{r}
+p.cutoff = 0.01
+c.cutoff = 0.8
+#
+gam.1s$sig = ifelse(gam.1s$adj.p < p.cutoff & abs(gam.1s$coef) > c.cutoff, T, F)
+gam.1e$sig = ifelse(gam.1e$adj.p < p.cutoff & abs(gam.1e$coef) > c.cutoff, T, F)
+gam.2s$sig = ifelse(gam.2s$adj.p < p.cutoff & abs(gam.2s$coef) > c.cutoff, T, F)
+gam.2e$sig = ifelse(gam.2e$adj.p < p.cutoff & abs(gam.2e$coef) > c.cutoff, T, F)
+```
+
+
+```{r}
+TF.1s = gam.1s[gam.1s$sig & gam.1s$is.TF,] %>% arrange(-coef) %>% dplyr::pull("geneSymbol")
+TF.1e = gam.1e[gam.1e$sig & gam.1e$is.TF,] %>% arrange(-coef) %>% dplyr::pull("geneSymbol")
+TF.2s = gam.2s[gam.2s$sig & gam.2s$is.TF,] %>% arrange(-coef) %>% dplyr::pull("geneSymbol")
+TF.2e = gam.2e[gam.2e$sig & gam.2e$is.TF,] %>% arrange(-coef) %>% dplyr::pull("geneSymbol")
+```
+
+```{r}
+start.uniq1 = sort(TF.1s[! TF.1s %in% TF.2s])
+start.uniq2 = sort(TF.2s[! TF.2s %in% TF.1s])
+start.common = sort(intersect(TF.1s, TF.2s))
+#
+cat("start uniq1:\n")
+print(paste(start.uniq1, collapse=", "))
+cat("\n")
+cat("start uniq2:\n")
+print(paste(start.uniq2, collapse=", "))
+cat("\n")
+cat("start common:\n")
+print(paste(start.common, collapse=", "))
+```
+
+```{r}
+end.uniq1 = sort(TF.1e[! TF.1e %in% TF.2e])
+end.uniq2 = sort(TF.2e[! TF.2e %in% TF.1e])
+end.common = sort(intersect(TF.1e, TF.2e))
+#
+cat("end uniq1:\n")
+print(paste(end.uniq1, collapse=", "))
+cat("\n")
+cat("end uniq2:\n")
+print(paste(end.uniq2, collapse=", "))
+cat("\n")
+cat("end common:\n")
+print(paste(end.common, collapse=", "))
+```
+
+
+## 3. coef comparison
+### TF.1s vs. TF.2s
+```{r}
+tarGenes = intersect(rownames(gam.1s[gam.1s$is.TF,]), rownames(gam.2s[gam.2s$is.TF,]))
+dat = data.frame(
+  geneSymbol = gam.1s[tarGenes,"geneSymbol"],
+  P1.coef = gam.1s[tarGenes,"coef"],
+  P2.coef = gam.2s[tarGenes,"coef"],
+  P1.sig = gam.1s[tarGenes,"sig"],
+  P2.sig = gam.2s[tarGenes,"sig"]
+)
+dat$group = case_when(
+  dat$P1.sig & dat$P2.sig ~ "both.Sig",
+  dat$P1.sig ~ "P1.sig",
+  dat$P2.sig ~ "P2.sig",
+  TRUE ~ "noSig"
+)
+dat$group = factor(dat$group, levels=c("both.Sig","P1.sig","P2.sig","noSig"))
+dat$diff.coef = dat$P1.coef - dat$P2.coef
+dat$mean.coef = (dat$P1.coef + dat$P2.coef) / 2
+colors = structure(names=c("both.Sig","P1.sig","P2.sig","noSig"), c("red","#FF8C00","#BA55D3","grey"))
+#
+hl_P1.s = dat[as.character(dat$group)=="P1.sig" & dat$P1.coef>0,] %>% arrange(desc(diff.coef)) %>% head(5)
+hl_P2.s = dat[as.character(dat$group)=="P2.sig" & dat$P2.coef>0,] %>% arrange(diff.coef) %>% head(5)
+hl_Co.s = dat[as.character(dat$group)=="both.Sig" & dat$mean.coef>0,] %>% arrange(desc(mean.coef)) %>% head(10)
+```
+
+
+
+
+```{r, fig.width=9.5, fig.height=8}
+p = ggplot(dat, aes(x=P1.coef,y=P2.coef,color=group)) +
+      geom_point_rast(shape=16, size=2, raster.dpi=300) + 
+      ggrepel::geom_text_repel(data=hl_P1.s, aes(label=geneSymbol), size=6, box.padding=0.5) +
+      ggrepel::geom_text_repel(data=hl_P2.s, aes(label=geneSymbol), size=6, box.padding=0.5) +
+      ggrepel::geom_text_repel(data=hl_Co.s, aes(label=geneSymbol), size=6, box.padding=0.5) +
+      geom_vline(xintercept=0, lty=5) +
+      geom_hline(yintercept=0, lty=5) +
+      geom_abline(slope=1, lty=5) +
+      theme_classic2() +
+      scale_color_manual(values=colors) +
+      guides(color=guide_legend(override.aes=list(size=5))) +
+      theme(axis.text=element_text(size=15),
+            axis.title=element_text(size=18),
+            plot.title=element_text(size=20)) +
+      ggtitle("TFs: P1.start vs. P2.start") +
+      xlim(c(-1,NA)) + ylim(c(-1,NA))
+print(p)
+ggsave(p, file=sprintf("%s/%s_Tex.dyn_genes.start_TFs.pdf",oDir,stype), width=9.5, height=8, useDingbats=F)
+```
+
+### TF.1e vs. TF.2e
+```{r}
+tarGenes = intersect(rownames(gam.1e[gam.1e$is.TF,]), rownames(gam.2e[gam.2e$is.TF,]))
+dat = data.frame(
+  geneSymbol = gam.1e[tarGenes,"geneSymbol"],
+  P1.coef = gam.1e[tarGenes,"coef"],
+  P2.coef = gam.2e[tarGenes,"coef"],
+  P1.sig = gam.1e[tarGenes,"sig"],
+  P2.sig = gam.2e[tarGenes,"sig"]
+)
+dat$group = case_when(
+  dat$P1.sig & dat$P2.sig ~ "both.Sig",
+  dat$P1.sig ~ "P1.sig",
+  dat$P2.sig ~ "P2.sig",
+  TRUE ~ "noSig"
+)
+dat$group = factor(dat$group, levels=c("both.Sig","P1.sig","P2.sig","noSig"))
+dat$diff.coef = dat$P1.coef - dat$P2.coef
+dat$mean.coef = (dat$P1.coef + dat$P2.coef) / 2
+colors = structure(names=c("both.Sig","P1.sig","P2.sig","noSig"), c("red","#FF8C00","#BA55D3","grey"))
+#
+hl_P1.e = dat[as.character(dat$group)=="P1.sig" & dat$P1.coef>0,] %>% arrange(desc(diff.coef)) %>% head(5)
+hl_P2.e = dat[as.character(dat$group)=="P2.sig" & dat$P2.coef>0,] %>% arrange(diff.coef) %>% head(5)
+hl_Co.e = dat[as.character(dat$group)=="both.Sig" & dat$mean.coef>0,] %>% arrange(desc(mean.coef)) %>% head(10)
+```
+
+
+```{r, fig.width=9.5, fig.height=8}
+p = ggplot(dat, aes(x=P1.coef,y=P2.coef,color=group)) +
+      geom_point_rast(shape=16, size=2, raster.dpi=300) + 
+      ggrepel::geom_text_repel(data=hl_P1.e, aes(label=geneSymbol), size=6, box.padding=0.5) +
+      ggrepel::geom_text_repel(data=hl_P2.e, aes(label=geneSymbol), size=6, box.padding=0.5) +
+      ggrepel::geom_text_repel(data=hl_Co.e, aes(label=geneSymbol), size=6, box.padding=0.5) +
+      geom_vline(xintercept=0, lty=5) +
+      geom_hline(yintercept=0, lty=5) +
+      geom_abline(slope=1, lty=5) +
+      theme_classic2() +
+      scale_color_manual(values=colors) +
+      guides(color=guide_legend(override.aes=list(size=5))) +
+      theme(axis.text=element_text(size=15),
+            axis.title=element_text(size=18),
+            plot.title=element_text(size=20)) +
+      ggtitle("TFs: P1.end vs. P2.end") +
+      xlim(c(-1,NA)) + ylim(c(-1,NA))
+print(p)
+ggsave(p, file=sprintf("%s/%s_Tex.dyn_genes.end_TFs.pdf",oDir,stype), width=9.5, height=8, useDingbats=F)
+```
+
+
+## 4. manual label on umap
+```{r}
+dat = reducedDim(sce, "recal.harmony.umap") %>% as.data.frame()
+colnames(dat) = c("UMAP1","UMAP2")
+dat$group = factor(sce$group, levels=c("P1.start","P1.end","P2.start","P2.end","Other"))
+#
+ldat = as.data.frame(matrix(NA, nrow=0, ncol=3))
+for (i in sort(unique(sce$group))){
+    if (i!="Other"){
+      tmp = apply(reducedDim(sce[,as.character(sce$group)==i], "recal.harmony.umap"), 2, mean)
+      this = data.frame(group=i, UMAP1=tmp[1], UMAP2=tmp[2])
+      ldat = rbind(ldat, this)
+    }
+}
+rownames(ldat) = ldat$group
+ldat$label = NA
+
+ldat["P1.start","label"] = sprintf("%s", paste(head(hl_P1.s$geneSymbol,3), collapse=","))
+ldat["P1.end","label"]   = sprintf("%s", paste(head(hl_P1.e$geneSymbol,3), collapse=","))
+ldat["P2.start","label"] = sprintf("%s", paste(head(hl_P2.s$geneSymbol,3), collapse=","))
+ldat["P2.end","label"]   = sprintf("%s", paste(head(hl_P2.e$geneSymbol,3), collapse=","))
+#
+colSet$group = structure(names=c("P1.start","P1.end","P2.start","P2.end","Other"),
+                         c("#90EE90","#228B22", "#87CEFA", "#1E90FF", "lightgrey"))
+```
+
+```{r, fig.width=8.5, fig.height=6.2}
+p = ggplot(dat, aes(x=UMAP1, y=UMAP2, color=group)) + 
+  geom_point_rast(raster.dpi=300, size=0.7, shape=16) +
+  ggrepel::geom_label_repel(data=ldat, aes(label=label), color="black", size=3) +
+  theme_classic2() +
+  scale_color_manual(values=colSet$group) +
+  guides(color=guide_legend(override.aes=list(size=3))) +
+  theme(axis.text=element_text(size=10),
+        axis.title=element_text(size=12),
+        plot.title=element_text(size=14)) +
+  coord_fixed(ratio=1, xlim=c(-10, 10),ylim = c(-10, 10),expand=F) +
+  ggtitle("key TFs in the two Paths")
+print(p)
+ggsave(p, file=sprintf("%s/%s_Tex.dyn_genes.UMAP.pdf",oDir,stype), width=8.5, height=6.2, useDingbats=F)
+```

@@ -1,0 +1,86 @@
+### Lord the packages, the data, etc.
+```{r}
+suppressPackageStartupMessages({
+library("reshape2")
+library("stringr")
+library("plyr")
+library("dplyr")
+library("ggpubr")
+library("ggsci")
+library("ggrastr")
+library("ggvenn")
+library("data.table")
+library("sscClust")
+library("gam")
+library("colorRamps")
+library("clusterProfiler")
+library("org.Hs.eg.db")
+})
+stype = "CD8"
+oDir = normalizePath("./OUT_FigS17", mustWork=F)
+dir.create(sprintf("%s",oDir), F, T)
+doParallel::registerDoParallel(cores=16)
+#
+colSet = readRDS(sprintf("%s/../../data/metaInfo/panC.colSet.list.rds",oDir))
+```
+
+# preprocess
+```{r, fig.width=5, fig.height=3}
+# diffmap
+diffmap = fread(sprintf("%s/../../data/metaInfo/%s.diffMap.txt.gz", oDir,stype), header=T, stringsAsFactors=F, sep="\t")
+diffmap = diffmap[,c("V1","1","2")] %>% as.data.frame() %>% tibble::column_to_rownames("V1")
+colnames(diffmap) = c("DC1","DC2")
+
+## modified sce
+sce = readRDS(sprintf("%s/../../data/expression/CD8/integration/int.CD8.S35.sce.merged.rds",oDir))
+sce = sce[,rownames(diffmap)]
+reducedDim(sce, "diffmap") = diffmap[,c("DC1","DC2")]
+sce$meta.cluster = as.character(sce$meta.cluster)
+#
+nam.conv = fread(sprintf("%s/../../data/metaInfo/name.conversion.txt",oDir),sep="\t",stringsAsFactors=F,header=T)
+nam.conv = as.data.frame(nam.conv)
+rownames(nam.conv) = nam.conv$meta.cluster
+sce$cluster.name = nam.conv[as.character(sce$meta.cluster),"cluster.name"]
+```
+
+
+# highlight 
+```{r,fig.height=5, fig.width=6.8}
+keep = c("Tn","ISG+ CD8+ T","terminal Tex")
+sce$group = ifelse(as.character(sce$cluster.name) %in% keep, as.character(sce$cluster.name), "Other") %>% 
+                factor(levels=c("Other",keep))
+colSet$group = c(structure(names=c("Other"), c("grey")), colSet$cluster.name.short.CD8)
+#
+dat = cbind(as.character(sce$group), reducedDim(sce,"diffmap"))
+colnames(dat)[1] = "group"
+tmp1 = dat[dat$group!="Other",]
+tmp2 = dat[dat$group=="Other",]
+set.seed(10)
+tmp1 = tmp1[sample(nrow(tmp1)),]
+#
+p = ggplot(tmp2, aes(x=DC1,y=DC2,color=group)) +
+      geom_point_rast(shape=16, size=0.4, raster.dpi=300) +
+      geom_point_rast(data=tmp1, size=0.4, raster.dpi=300) +
+      scale_color_manual(values=colSet$group[unique(dat$group)]) +
+      theme_bw()
+print(p)
+ggsave(p, file=sprintf("%s/%s_ISG.highlight.diffmap.pdf",oDir,stype), width=6.8, height=5,  useDingbats=F)
+```
+
+```{r,fig.width=4.5,fig.height=4}
+keep = c("Tn","ISG+ CD8+ T", "terminal Tex")
+dat = cbind(reducedDim(sce[,as.character(sce$cluster.name) %in% keep], "diffmap"), sce[,as.character(sce$cluster.name) %in% keep]$cluster.name)
+colnames(dat)[3] = "cluster.name"
+dat$cluster.name = factor(dat$cluster.name, levels=keep)
+#
+p = ggplot(dat, aes(x=cluster.name, y=DC2, color=cluster.name)) +
+      geom_boxplot(outlier.shape=NA, width=0.8) +
+      geom_jitter_rast(raster.dpi=300, shape=16, size=1.2, alpha=0.7) +
+      scale_color_manual(values=colSet$cluster.name.short.CD8[unique(as.character(dat$cluster.name))]) +
+      stat_compare_means(comparisons=list(c("Tn","ISG+ CD8+ T"), c("ISG+ CD8+ T","terminal Tex")), size=5, label="p.signif" ) + 
+      theme_classic2() +
+      ylab("Diffusion component 2")
+print(p)
+ggsave(p, file=sprintf("%s/%s_ISG.highlight.dc2_box.pdf",oDir,stype), width=4.5, height=4,  useDingbats=F)
+```
+

@@ -1,0 +1,147 @@
+---
+title: "R Notebook"
+output: html_notebook
+fig_width: 6 
+fig_height: 6
+---
+
+# Lord the packages, the data, etc.
+```{r}
+suppressPackageStartupMessages({
+library("SingleCellExperiment")
+library("Seurat")
+library("sscClust")
+library("grid")
+library("reshape2")
+library("stringr")
+library("plyr")
+library("dplyr")
+library("ggpubr")
+library("monocle3")
+library("ggrastr")
+library("zoo")
+library("rlang")
+library("png")
+library("data.table")
+})
+stype = "CD8"
+odir = sprintf("%s/OUT_FigS13",getwd())
+dir.create(sprintf("%s", odir), F, T)
+
+colSet = readRDS(sprintf("%s/../../data/metaInfo/panC.colSet.list.rds", odir))
+#
+sce = readRDS(sprintf("%s/../../data/expression/%s/integration/int.%s.S35.sce.merged.rds", odir,stype,stype))
+
+####
+nam.conv = fread(sprintf("%s/../../data/metaInfo/name.conversion.txt",odir),sep="\t",stringsAsFactors=F,header=T)
+nam.conv = as.data.frame(nam.conv)
+rownames(nam.conv) = nam.conv$meta.cluster
+sce$cluster.name = nam.conv[as.character(sce$meta.cluster),"cluster.name"]
+#
+colSet[['cluster.name']] = structure(nam.conv$mcolor, names=nam.conv$cluster.name)
+```
+
+```{r, fig.width=6, fig.height=5}
+mat = as(assay(sce,"exprs"), 'sparseMatrix')
+mat[is.na(mat)] = 0
+
+cellInfo = colData(sce) %>% as.data.frame
+geneInfo = data.frame(gene_short_name=row.names(mat), row.names=row.names(mat))
+rownames(mat) = NULL
+colnames(mat) = NULL
+cds = new_cell_data_set(expression_data=mat, cell_metadata=cellInfo, gene_metadata=geneInfo)
+#
+colData(cds) = colData(cds)[,!grepl("^RNA_",colnames(colData(cds)))]
+cds = preprocess_cds(cds, num_dim = 50)
+reducedDim(cds, "UMAP") = reducedDim(sce, "harmony.umap")
+###
+plot_cells(cds, color_cells_by="meta.cluster", 
+           label_groups_by_cluster=FALSE, 
+           reduction_method="UMAP", 
+           group_label_size=3.5, 
+           cell_size=0.5, 
+           show_trajectory_graph=F) + 
+  scale_colour_manual(values=colSet$meta.cluster)
+```
+
+
+## run
+```{r fig.height=4, fig.width=5}
+cds = cluster_cells(cds)
+cds = learn_graph(cds, use_partition=T,verbose=T, learn_graph_control=list(
+  minimal_branch_len=10
+))
+```
+
+
+##  plot
+```{r fig.height=4, fig.width=5}
+width=5
+height=4
+#
+p = plot_cells(cds,
+           color_cells_by = "cluster.name",
+           trajectory_graph_color="black",
+           trajectory_graph_segment_size=1,
+           label_groups_by_cluster=F,
+           label_roots=F,
+           label_leaves=F,
+           label_branch_points=F,
+           cell_size=0.5, 
+           #graph_label_size=2,
+           group_label_size=3,
+           rasterize=T) + 
+  scale_colour_manual(values=colSet$cluster.name)
+#
+print(p)
+ggsave(p, file=sprintf("%s/%s.umap_M3line.pdf", odir, stype), width=width, height=height, useDingbats=F)
+```
+
+## order cells
+```{r fig.height=4, fig.width=5.5}
+start = c("CD8.c01.Tn.MAL")
+#
+closest_vertex = cds@principal_graph_aux[["UMAP"]]$pr_graph_cell_proj_closest_vertex
+closest_vertex = as.matrix(closest_vertex[colnames(cds), ])
+root_pr_nodes = igraph::V(principal_graph(cds)[["UMAP"]])$name
+#
+flag = closest_vertex[as.character(colData(cds)$meta.cluster) %in% start,]
+flag = as.numeric(names(which.max(table( flag ))))
+root_pr_nodes = root_pr_nodes[flag]
+#
+cds = order_cells(cds, root_pr_nodes=root_pr_nodes )
+##
+width=5.5
+height=4
+#
+p = plot_cells(cds,
+           color_cells_by = "pseudotime",
+           label_cell_groups=F,
+           label_groups_by_cluster=F,
+           label_roots=F,
+           label_leaves=F,
+           label_branch_points=F,
+           cell_size=0.5, 
+           group_label_size=3,
+           rasterize=F)
+#
+print(p)
+ggsave(p, file=sprintf("%s/%s.umap_M3pseudotime.pdf", odir, stype),
+       width=width, height=height, useDingbats=F)
+```
+
+
+```{r}
+time = pseudotime(cds)
+time[time==Inf] = 0 
+time = data.frame(miniCluster=names(time), pseudotime=time)
+write.table(time, file=sprintf("%s/%s.monocle3.pseudotime.txt",odir,stype),
+            sep="\t", quote=F, col.names=T, row.names=F)
+#
+saveRDS(cds, file=sprintf("%s/%s.monocle3.rds",odir,stype))
+```
+
+
+
+
+
