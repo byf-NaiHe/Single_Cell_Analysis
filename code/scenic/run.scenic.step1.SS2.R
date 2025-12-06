@@ -12,7 +12,7 @@ library("R.utils")
 RhpcBLASctl::omp_set_num_threads(1)
 doParallel::registerDoParallel(cores = 20)
 
-out.prefix <- "OUT.scenic/sce/scenic.zhangLabSS2"
+out.prefix <- "OUT.scenic/sce/scenic.SS2"
 dir.create(dirname(out.prefix),F,T)
 
 gene.exclude.file <- "../../data/external/exclude.gene.misc.misc.v3.withoutStress.RData"
@@ -24,10 +24,10 @@ meta.tb.file <- "../../data/metaInfo/panC.freq.all.meta.tb.rds"
 sce.xx.CD8 <- readRDS("../../data/expression/CD8/integration/int.CD8.S35.sce.merged.rds")
 sce.xx.CD4 <- readRDS("../../data/expression/CD4/integration/int.CD4.S35.sce.merged.rds")
 
-sce <- readRDS("../../data/expression/zhangLab/S3.SS2.sce.rds")
+sce <- readRDS("../../data/expression/S3.SS2.sce.rds")
 
 meta.tb <- readRDS(meta.tb.file)
-meta.tb <- meta.tb[dataset.tech=="zhangLabSS2" ,]
+meta.tb <- meta.tb[dataset.tech=="SS2" ,]
 
 all(meta.tb[["cellID"]] %in% colnames(sce))
 sce <- sce[,meta.tb[["cellID"]]]
