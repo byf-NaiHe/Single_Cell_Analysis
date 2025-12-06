@@ -12,7 +12,7 @@ library("R.utils")
 RhpcBLASctl::omp_set_num_threads(1)
 doParallel::registerDoParallel(cores = 20)
 
-out.prefix <- "OUT.scenic/sce/scenic.zhangLab10X"
+out.prefix <- "OUT.scenic/sce/scenic.10X"
 dir.create(dirname(out.prefix),F,T)
 
 gene.exclude.file <- "../../data/external/exclude.gene.misc.misc.v3.withoutStress.RData"
@@ -28,8 +28,8 @@ sce.list <- list(
                  ### combined data of T cells from patients with solid tumors
                  "S"=readRDS("../../data/expression/zhangLab/S.10X.sce.rds"),
                  ### data of T cells from patients with BCL and MM
-				 "BCL"=readRDS("../../data/expression/zhangLab/BCL.10X.sce.rds"),
-				 "MM"=readRDS("../../data/expression/zhangLab/MM.10X.sce.rds"))
+				 "BCL"=readRDS("../../data/expression/BCL.10X.sce.rds"),
+				 "MM"=readRDS("../../data/expression/MM.10X.sce.rds"))
 
 {
     x.col <- NULL
