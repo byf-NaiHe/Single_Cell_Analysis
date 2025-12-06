@@ -26,10 +26,10 @@ sce.xx.CD4 <- readRDS("../../data/expression/CD4/integration/int.CD4.S35.sce.mer
 
 sce.list <- list(
                  ### combined data of T cells from patients with solid tumors
-                 "S"=readRDS("../../data/expression/zhangLab/S.10X.sce.rds"),
+                 "S"=readRDS("../../data/expression/S.10X.sce.rds"),
                  ### data of T cells from patients with BCL and MM
-				 "BCL"=readRDS("../../data/expression/zhangLab/BCL.10X.sce.rds"),
-				 "MM"=readRDS("../../data/expression/zhangLab/MM.10X.sce.rds"))
+				 "BCL"=readRDS("../../data/expression/BCL.10X.sce.rds"),
+				 "MM"=readRDS("../../data/expression/MM.10X.sce.rds"))
 
 {
     x.col <- NULL
